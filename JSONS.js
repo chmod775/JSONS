@@ -26,6 +26,20 @@ JSON.__proto__._modelFromName = function(name) {
 }
 
 
+// Default model
+//		ID
+// Tracking (used for updates)
+//		prevID
+// Timestamps
+//		createdAt
+//		updatedAt
+//		deletedAt (if soft delete enabled)
+
+JSON.__proto__.__config = {
+	useTracking: true,
+	softDelete: true,
+	useTimestamps: true
+};
 JSON.__proto__.__DB = {};
 
 JSON.__proto__.__models = [];
@@ -49,15 +63,19 @@ JSON.__proto__.__connector = {
 		let idx = JSON.__proto__.__DB[model.name].findIndex(t => t.ID == data.ID);
 		if (idx < 0)
 			return null;
-		JSON.__proto__.__DB[model.name][idx] = data;
+		JSON.__proto__.__DB[model.name][idx] = Object.assign(JSON.__proto__.__DB[model.name][idx], data);
 		return data;
 	},
 	delete: function(model, id) {}
 };
 
-JSON.__proto__.model = function(name, columns) {
+JSON.__proto__.model = function(name, columnsOrObject) {
 	name = name.toLowerCase().trim();
-	columns = columns || [];
+	// Get columns
+	if (Array.isArray(columnsOrObject))
+		columns = columnsOrObject || [];
+	else
+		columns = Object.keys(columnsOrObject) || [];
 
 	// ERROR: Cannot create a model with empty name
 	if (name.length == 0) {
@@ -129,14 +147,25 @@ JSON.__proto__.save = function(data, model) {
 				return null;
 			}
 
-			let nestedSavedModel = JSON.__proto__.save(kVal, nestedModel);
-			if (nestedSavedModel == null) {
-				console.error('JSON.save "' + model.name + '": An error occurred during nested model saving.');
-				return null;
-			}
+			if ('ID' in kVal) {
+				let nestedLoadedModel = JSON.__proto__.loadWithID(nestedModel.name, kVal.ID);
+				if (nestedLoadedModel == null) {
+					console.error('JSON.save "' + model.name + '": An error occurred during nested model loading.');
+					return null;
+				}
 
-			modelData[k] = 	nestedSavedModel;
-			dbData[k] = 	nestedSavedModel.ID;				
+				modelData[k] = 	nestedLoadedModel;
+				dbData[k] = 	nestedLoadedModel.ID;
+			} else {
+				let nestedSavedModel = JSON.__proto__.save(kVal, nestedModel);
+				if (nestedSavedModel == null) {
+					console.error('JSON.save "' + model.name + '": An error occurred during nested model saving.');
+					return null;
+				}
+
+				modelData[k] = 	nestedSavedModel;
+				dbData[k] = 	nestedSavedModel.ID;
+			}
 
 			// Keep track of foreigns columns
 			if (k in model.foreigns)
@@ -158,8 +187,33 @@ JSON.__proto__.save = function(data, model) {
 
 	// Save model to DB
 	if ('ID' in data) { // Update model
-		let savedModelData = JSON.__proto__.__connector.update(model, dbData);
+		if (JSON.__proto__.__config.useTimestamps)
+			dbData.updatedAt = Date.now();
+
+		if (JSON.__proto__.__config.useTracking) {
+			let actualData = JSON.__proto__.__connector.read(model, dbData.ID);
+
+			let backupDbData = Object.assign({}, actualData);
+			backupDbData.ID = null;
+			let savedModelData = JSON.__proto__.__connector.create(model, backupDbData);
+
+			dbData.prevID = savedModelData.ID;
+		}
+
+		JSON.__proto__.__connector.update(model, dbData);
 	} else { // Create new model
+		// Tracking enabled
+		if (JSON.__proto__.__config.useTracking)
+			dbData.prevID = null;
+
+		// Use timestamps
+		if (JSON.__proto__.__config.useTimestamps) {
+			dbData.createdAt = Date.now();
+			dbData.updatedAt = null;
+			if (JSON.__proto__.__config.softDelete)
+				dbData.deletedAt = null;
+		}
+
 		let savedModelData = JSON.__proto__.__connector.create(model, dbData);
 		modelData.ID = savedModelData.ID;
 	}
@@ -168,14 +222,38 @@ JSON.__proto__.save = function(data, model) {
 	return modelData;
 }
 
-JSON.__proto__.load = function(name, id) {
+JSON.__proto__.loadWithExample = function(data, config) {
+	config = config || {
+
+	};
+
+	if (!isObject(data)) {
+		console.error('JSON.loadWithExample: Argument data must be a object.');
+		return null;
+	}
+
+	// Find model from structure
+	model = model || JSON._modelFromStructure(data);
+	if (model == null) {
+		console.error('JSON.loadWithExample: Cannot find any model matching the data structure.');
+		return null;
+	}
+
+	return null;
+}
+
+JSON.__proto__.loadWithID = function(name, id, config) {
+	config = config || {
+		includeHistory: false
+	}
+
 	name = name.toLowerCase().trim();
 
 	// Find model from name
 	let model = JSON._modelFromName(name);
 
 	if (model == null) {
-		console.error('JSON.load: Cannot find any model.');
+		console.error('JSON.loadWithID: Cannot find any model.');
 		return null;
 	}
 
@@ -183,30 +261,40 @@ JSON.__proto__.load = function(name, id) {
 	let readModelData = JSON.__proto__.__connector.read(model, id);
 
 	if (readModelData == null) {
-		console.error('JSON.load: ID not found.');
+		console.error('JSON.loadWithID: ID not found.');
 		return null;	
 	}
 
-	// Check for nested models
+	// Model data to return
 	let modelData = {};
+
+	// Check for history
+	if (config.includeHistory) {
+		let history = [];
+
+		var prevID = readModelData.prevID;
+		while (prevID) {
+			let prevReadModelData = JSON.__proto__.loadWithID(model.name, prevID);
+			if (prevReadModelData == null) {
+				console.error('JSON.loadWithID: Previous ID not found.');
+				return null;	
+			}
+
+			history.push(prevReadModelData);
+			prevID = prevReadModelData.prevID;
+		}
+
+		modelData._history = history;
+	}
+
+	// Check for nested models
 	for (let k of Object.keys(readModelData)) {
 		let kVal = readModelData[k];
 
-		if (k in model.foreigns) { // Columns is nested model
-			modelData[k] = JSON.__proto__.load(model.foreigns[k], kVal);
-		} else {
+		if (k in model.foreigns) // Columns is nested model
+			modelData[k] = JSON.__proto__.loadWithID(model.foreigns[k], kVal, config);
+		else
 			modelData[k] = kVal;
-		}
-
-		if (k.includes('___')) { 
-			let kSplit = k.split('___');
-			if (kSplit.length != 2) {
-				console.error('JSON.load: Error in nested model columns format.');
-				return null;
-			}
-			modelData[kSplit[1]] = JSON.__proto__.load(kSplit[0], kVal);
-		} else {
-		}
 	}
 
 	return modelData;
@@ -237,7 +325,19 @@ console.log(book_2);
 user.name = 'Pippo';
 JSON.save(user);
 
-console.log(JSON.load('book', 1));
+user.name = 'Helloworld';
+JSON.save(user);
 
+var newUser = JSON.save({
+	name: "Alien",
+	surname: "Logic"
+});
+
+book_1.author = newUser;
+JSON.save(book_1);
+
+console.log(JSON.stringify(JSON.loadWithID('book', 1, { includeHistory: true }), null, 2));
+
+console.log("--- DEBUG ---")
 //console.log(JSON.__proto__.__models);
 console.log(JSON.__proto__.__DB);
