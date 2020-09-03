@@ -1,13 +1,33 @@
 // Returns if a value is an object
-function isObject(value) {
+JSON.__proto__._isObject = function (value) {
 	return value && typeof value === 'object' && value.constructor === Object;
+}
+
+JSON.__proto__._columnsFromStructure = function(structure, parent) {
+	parent = parent || '';
+	let columns = [];
+
+	for (let k of Object.keys(structure)) {
+		let columnName = [parent, k].filter(t => t.length > 0).join('_');
+
+		if (JSON.__proto__._isObject(structure[k])) { // Sub model
+			if (JSON.__proto__._modelFromStructure(structure[k]) == null) // Sub model is not a foreign model
+				columns = columns.concat(JSON.__proto__._columnsFromStructure(structure[k], columnName).map(t => [parent, t].filter(t => t.length > 0).join('_')));
+			else
+				columns.push(columnName);
+		} else { // Field
+			columns.push(columnName);
+		}
+	}
+
+	return columns;
 }
 
 JSON.__proto__._modelFromStructure = function(structure) {
 	let model = null;
 
 	for (let m of JSON.__proto__.__models) {
-		if (m.columns.join() == Object.keys(structure).filter(t => t != 'ID').join()) {
+		if (m.columns.join() == JSON.__proto__._columnsFromStructure(structure).filter(t => t != 'ID').join()) {
 			model = m;
 			break;
 		}
@@ -69,13 +89,12 @@ JSON.__proto__.__connector = {
 	delete: function(model, id) {}
 };
 
-JSON.__proto__.model = function(name, columnsOrObject) {
+JSON.__proto__.model = function(name, structure) {
 	name = name.toLowerCase().trim();
+	structure = structure || {};
+
 	// Get columns
-	if (Array.isArray(columnsOrObject))
-		columns = columnsOrObject || [];
-	else
-		columns = Object.keys(columnsOrObject) || [];
+	columns = JSON.__proto__._columnsFromStructure(structure) || [];
 
 	// ERROR: Cannot create a model with empty name
 	if (name.length == 0) {
@@ -110,6 +129,7 @@ JSON.__proto__.model = function(name, columnsOrObject) {
 	// Create model
 	let newModel = {
 		name: name,
+		structure: structure,
 		columns: columns,
 		foreigns: {}
 	};
@@ -119,7 +139,7 @@ JSON.__proto__.model = function(name, columnsOrObject) {
 }
 
 JSON.__proto__.save = function(data, model) {
-	if (!isObject(data)) {
+	if (!JSON.__proto__._isObject(data)) {
 		console.error('JSON.save: Argument data must be a object.');
 		return null;
 	}
@@ -139,7 +159,7 @@ JSON.__proto__.save = function(data, model) {
 	for (let k of Object.keys(data)) {
 		let kVal = data[k];
 
-		if (isObject(kVal)) {
+		if (JSON.__proto__._isObject(kVal)) {
 			// Save nested model and replace with ID
 			let nestedModel = JSON._modelFromStructure(kVal);
 			if (nestedModel == null) {
@@ -227,7 +247,7 @@ JSON.__proto__.loadWithExample = function(data, config) {
 
 	};
 
-	if (!isObject(data)) {
+	if (!JSON.__proto__._isObject(data)) {
 		console.error('JSON.loadWithExample: Argument data must be a object.');
 		return null;
 	}
@@ -300,10 +320,18 @@ JSON.__proto__.loadWithID = function(name, id, config) {
 	return modelData;
 }
 
-JSON.model('book', ['name', 'author'])
-JSON.model('user', ['name', 'surname'])
+/// TESTING ///
 
+JSON.model('book', { name: '', author: '' })
+JSON.model('user', { name: '', surname: '' })
 
+JSON.model('test', {
+	item: '',
+	group: {
+		name: '',
+		role: ''
+	}
+})
 
 var book_1 = JSON.save({
 	name: 'Guida galattica per autostoppisti',
@@ -315,6 +343,14 @@ var book_1 = JSON.save({
 console.log(book_1);
 
 user = book_1.author;
+
+JSON.save({
+	item: 'Boh',
+	group: {
+		name: 'michele',
+		role: 'admin'
+	}
+})
 
 var book_2 = JSON.save({
 	name: 'Boh',
@@ -340,4 +376,5 @@ console.log(JSON.stringify(JSON.loadWithID('book', 1, { includeHistory: true }),
 
 console.log("--- DEBUG ---")
 //console.log(JSON.__proto__.__models);
+console.log(JSON.__proto__.__models);
 console.log(JSON.__proto__.__DB);
